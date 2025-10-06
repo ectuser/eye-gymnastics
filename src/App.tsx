@@ -5,6 +5,7 @@ import { useExerciseController } from './hooks/useExerciseController';
 import { formatSeconds } from './utils/time';
 import { useThemePreference } from './hooks/useThemePreference';
 import { ThemeSwitcher } from './components/ThemeSwitcher';
+import { useBreakDueFavicon } from './hooks/useBreakDueFavicon';
 
 const AUDIO_PREF_KEY = 'settings:audio-enabled';
 const EXERCISE_SETTINGS_KEY = 'settings:exercise-config';
@@ -153,6 +154,8 @@ const App: React.FC = () => {
   const controller = useExerciseController(exerciseConfig, {
     enableAudio: audioEnabled,
   });
+
+  useBreakDueFavicon(controller.breakDue);
 
   useEffect(() => {
     if (!isSettingsOpen) {
