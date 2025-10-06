@@ -124,6 +124,5 @@ export const sendNotification = ({ title, options }: NotificationPayload): void 
     return;
   }
 
-  // eslint-disable-next-line no-new
   new Notification(title, options);
 };
