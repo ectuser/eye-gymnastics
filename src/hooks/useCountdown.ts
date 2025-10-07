@@ -87,21 +87,16 @@ const readPersistedMeta = (storageKey?: string): PersistedCountdownMeta | null =
       return null;
     }
 
-    const parsed = JSON.parse(rawValue);
+    const parsed: unknown = JSON.parse(rawValue);
 
     if (!parsed || typeof parsed !== 'object') {
       return null;
     }
 
-    const targetTimestamp =
-      typeof (parsed as Record<string, unknown>).targetTimestamp === 'number'
-        ? (parsed as Record<string, unknown>).targetTimestamp
-        : null;
-    const isRunning = Boolean((parsed as Record<string, unknown>).isRunning);
-    const lastUpdated =
-      typeof (parsed as Record<string, unknown>).lastUpdated === 'number'
-        ? (parsed as Record<string, unknown>).lastUpdated
-        : Date.now();
+    const obj = parsed as Record<string, unknown>;
+    const targetTimestamp = typeof obj.targetTimestamp === 'number' ? obj.targetTimestamp : null;
+    const isRunning = Boolean(obj.isRunning);
+    const lastUpdated = typeof obj.lastUpdated === 'number' ? obj.lastUpdated : Date.now();
 
     return {
       targetTimestamp,
@@ -163,22 +158,22 @@ export const useCountdown = (
 
   const durationRef = useRef(normalizedInitialDuration);
   const targetTimestampRef = useRef<number | null>(persistedMeta?.targetTimestamp ?? null);
-  const intervalRef = useRef<number | null>(null);
-  const restartTimeoutRef = useRef<number | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startRef = useRef<(durationSeconds?: number) => void>(() => undefined);
   const onCompleteRef = useRef<(() => void) | undefined>(options.onComplete);
   const autoRestartRef = useRef<boolean>(options.autoRestart ?? false);
 
   const clearRestartTimeout = useCallback(() => {
     if (restartTimeoutRef.current !== null) {
-      window.clearTimeout(restartTimeoutRef.current);
+      clearTimeout(restartTimeoutRef.current);
       restartTimeoutRef.current = null;
     }
   }, []);
 
   const clearIntervalRef = useCallback(() => {
     if (intervalRef.current !== null) {
-      window.clearInterval(intervalRef.current);
+      clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
   }, []);
@@ -218,7 +213,7 @@ export const useCountdown = (
 
       if (autoRestartRef.current) {
         clearRestartTimeout();
-        restartTimeoutRef.current = window.setTimeout(() => {
+        restartTimeoutRef.current = setTimeout(() => {
           startRef.current(durationRef.current);
         }, 0);
       }
@@ -241,7 +236,7 @@ export const useCountdown = (
       setIsRunning(true);
       persistState(duration, true);
 
-      intervalRef.current = window.setInterval(tick, 1000);
+      intervalRef.current = setInterval(tick, 1000);
       tick();
     },
     [clearIntervalRef, clearRestartTimeout, persistState, tick]
