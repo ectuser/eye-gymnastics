@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Subscription, timer, map, takeWhile } from 'rxjs';
 
 type CountdownOptions = {
   autoRestart?: boolean;
@@ -15,6 +14,21 @@ type UseCountdownResult = {
   reset: (durationSeconds?: number) => void;
   setOnComplete: (callback?: () => void) => void;
 };
+
+type PersistedCountdownMeta = {
+  targetTimestamp: number | null;
+  isRunning: boolean;
+  lastUpdated: number;
+};
+
+type CountdownSnapshot = {
+  remainingSeconds: number;
+  targetTimestamp: number | null;
+  isRunning: boolean;
+  lastUpdated: number | null;
+};
+
+const META_SUFFIX = ':meta';
 
 const toPositiveInteger = (value: number): number => {
   if (!Number.isFinite(value)) {
@@ -61,21 +75,97 @@ const persistSeconds = (storageKey: string, value: number) => {
   }
 };
 
+const readPersistedMeta = (storageKey?: string): PersistedCountdownMeta | null => {
+  if (!storageKey || typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(`${storageKey}${META_SUFFIX}`);
+
+    if (!rawValue) {
+      return null;
+    }
+
+    const parsed = JSON.parse(rawValue);
+
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+
+    const targetTimestamp =
+      typeof (parsed as Record<string, unknown>).targetTimestamp === 'number'
+        ? (parsed as Record<string, unknown>).targetTimestamp
+        : null;
+    const isRunning = Boolean((parsed as Record<string, unknown>).isRunning);
+    const lastUpdated =
+      typeof (parsed as Record<string, unknown>).lastUpdated === 'number'
+        ? (parsed as Record<string, unknown>).lastUpdated
+        : Date.now();
+
+    return {
+      targetTimestamp,
+      isRunning,
+      lastUpdated,
+    };
+  } catch (error) {
+    console.warn('Failed to read countdown metadata', error);
+    return null;
+  }
+};
+
+const persistMeta = (storageKey: string, meta: PersistedCountdownMeta) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(`${storageKey}${META_SUFFIX}`, JSON.stringify(meta));
+  } catch (error) {
+    console.warn('Failed to persist countdown metadata', error);
+  }
+};
+
 export const useCountdown = (
   initialDurationSeconds: number,
   options: CountdownOptions = {}
 ): UseCountdownResult => {
   const normalizedInitialDuration = toPositiveInteger(initialDurationSeconds);
   const persistedSeconds = readPersistedSeconds(options.storageKey);
+  const persistedMeta = readPersistedMeta(options.storageKey);
 
-  const [remainingSeconds, setRemainingSeconds] = useState(() =>
-    persistedSeconds !== null ? Math.min(persistedSeconds, normalizedInitialDuration) : normalizedInitialDuration
-  );
-  const [isRunning, setIsRunning] = useState(false);
+  const computeInitialRemaining = () => {
+    if (persistedMeta?.targetTimestamp) {
+      const diff = persistedMeta.targetTimestamp - Date.now();
+      const fromTarget = Math.max(0, Math.ceil(diff / 1000));
+      return Math.min(fromTarget, normalizedInitialDuration);
+    }
+
+    if (persistedSeconds !== null) {
+      return Math.min(persistedSeconds, normalizedInitialDuration);
+    }
+
+    return normalizedInitialDuration;
+  };
+
+  const [remainingSeconds, setRemainingSeconds] = useState(computeInitialRemaining);
+  const [isRunning, setIsRunning] = useState<boolean>(() => {
+    if (!persistedMeta) {
+      return false;
+    }
+
+    if (persistedMeta.targetTimestamp && persistedMeta.targetTimestamp <= Date.now()) {
+      return false;
+    }
+
+    return persistedMeta.isRunning;
+  });
 
   const durationRef = useRef(normalizedInitialDuration);
-  const subscriptionRef = useRef<Subscription | null>(null);
+  const targetTimestampRef = useRef<number | null>(persistedMeta?.targetTimestamp ?? null);
+  const intervalRef = useRef<number | null>(null);
   const restartTimeoutRef = useRef<number | null>(null);
+  const startRef = useRef<(durationSeconds?: number) => void>(() => undefined);
   const onCompleteRef = useRef<(() => void) | undefined>(options.onComplete);
   const autoRestartRef = useRef<boolean>(options.autoRestart ?? false);
 
@@ -86,62 +176,104 @@ export const useCountdown = (
     }
   }, []);
 
-  const stop = useCallback(() => {
-    subscriptionRef.current?.unsubscribe();
-    subscriptionRef.current = null;
-    clearRestartTimeout();
-    setIsRunning(false);
-  }, [clearRestartTimeout]);
+  const clearIntervalRef = useCallback(() => {
+    if (intervalRef.current !== null) {
+      window.clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+  }, []);
+
+  const persistState = useCallback(
+    (nextRemaining: number, nextIsRunning: boolean) => {
+      if (!options.storageKey) {
+        return;
+      }
+
+      persistSeconds(options.storageKey, nextRemaining);
+      persistMeta(options.storageKey, {
+        targetTimestamp: targetTimestampRef.current,
+        isRunning: nextIsRunning,
+        lastUpdated: Date.now(),
+      });
+    },
+    [options.storageKey]
+  );
+
+  const tick = useCallback(() => {
+    if (targetTimestampRef.current === null) {
+      return;
+    }
+
+    const diff = targetTimestampRef.current - Date.now();
+    const nextValue = Math.max(0, Math.ceil(diff / 1000));
+
+    setRemainingSeconds((previous) => (previous === nextValue ? previous : nextValue));
+
+    if (diff <= 0) {
+      clearIntervalRef();
+      targetTimestampRef.current = null;
+      setIsRunning(false);
+      persistState(0, false);
+      onCompleteRef.current?.();
+
+      if (autoRestartRef.current) {
+        clearRestartTimeout();
+        restartTimeoutRef.current = window.setTimeout(() => {
+          startRef.current(durationRef.current);
+        }, 0);
+      }
+    }
+  }, [clearIntervalRef, clearRestartTimeout, persistState]);
 
   const start = useCallback(
     (durationSeconds?: number) => {
       const duration = toPositiveInteger(durationSeconds ?? durationRef.current);
       durationRef.current = duration;
 
-      stop();
-      setRemainingSeconds(duration);
+      clearIntervalRef();
+      clearRestartTimeout();
+
+      const now = Date.now();
+      const target = now + duration * 1000;
+      targetTimestampRef.current = target;
+
+      setRemainingSeconds(Math.min(duration, Math.max(0, Math.ceil((target - now) / 1000))));
       setIsRunning(true);
+      persistState(duration, true);
 
-      const countdown$ = timer(0, 1000).pipe(
-        map((elapsed) => duration - elapsed),
-        takeWhile((value) => value >= 0)
-      );
-
-      const subscription = countdown$.subscribe({
-        next: (value) => {
-          const nextValue = toPositiveInteger(value);
-          setRemainingSeconds(nextValue);
-
-          if (nextValue === 0) {
-            setIsRunning(false);
-            onCompleteRef.current?.();
-
-            if (autoRestartRef.current) {
-              clearRestartTimeout();
-              restartTimeoutRef.current = window.setTimeout(() => {
-                start(duration);
-              }, 0);
-            }
-          }
-        },
-        complete: () => {
-          setIsRunning(false);
-        },
-      });
-
-      subscriptionRef.current = subscription;
+      intervalRef.current = window.setInterval(tick, 1000);
+      tick();
     },
-    [clearRestartTimeout, stop]
+    [clearIntervalRef, clearRestartTimeout, persistState, tick]
   );
+
+  startRef.current = start;
+
+  const stop = useCallback(() => {
+    tick();
+    clearIntervalRef();
+    clearRestartTimeout();
+    targetTimestampRef.current = null;
+    setIsRunning(false);
+    setRemainingSeconds((previous) => {
+      persistState(previous, false);
+      return previous;
+    });
+  }, [clearIntervalRef, clearRestartTimeout, persistState, tick]);
 
   const reset = useCallback(
     (durationSeconds?: number) => {
       const duration = toPositiveInteger(durationSeconds ?? durationRef.current);
       durationRef.current = duration;
-      stop();
+
+      clearIntervalRef();
+      clearRestartTimeout();
+      targetTimestampRef.current = null;
+      setIsRunning(false);
       setRemainingSeconds(duration);
+      persistState(duration, false);
     },
-    [stop]
+    [clearIntervalRef, clearRestartTimeout, persistState]
   );
 
   const setOnComplete = useCallback((callback?: () => void) => {
@@ -160,21 +292,63 @@ export const useCountdown = (
     const normalized = toPositiveInteger(initialDurationSeconds);
     durationRef.current = normalized;
 
-    const nextRemaining = readPersistedSeconds(options.storageKey);
-    setRemainingSeconds(nextRemaining !== null ? Math.min(nextRemaining, normalized) : normalized);
+    if (!targetTimestampRef.current) {
+      const nextRemaining = readPersistedSeconds(options.storageKey);
+      setRemainingSeconds(nextRemaining !== null ? Math.min(nextRemaining, normalized) : normalized);
+    }
   }, [initialDurationSeconds, options.storageKey]);
 
   useEffect(() => {
-    if (!options.storageKey || typeof window === 'undefined') {
+    if (!options.storageKey) {
       return;
     }
 
     persistSeconds(options.storageKey, remainingSeconds);
-  }, [options.storageKey, remainingSeconds]);
+    persistMeta(options.storageKey, {
+      targetTimestamp: targetTimestampRef.current,
+      isRunning,
+      lastUpdated: Date.now(),
+    });
+  }, [isRunning, options.storageKey, remainingSeconds]);
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      const handleVisibility = () => {
+        if (!document.hidden) {
+          tick();
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleVisibility);
+
+      return () => {
+        document.removeEventListener('visibilitychange', handleVisibility);
+      };
+    }
+
+    return undefined;
+  }, [tick]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const handleFocus = () => {
+        tick();
+      };
+
+      window.addEventListener('focus', handleFocus);
+
+      return () => {
+        window.removeEventListener('focus', handleFocus);
+      };
+    }
+
+    return undefined;
+  }, [tick]);
 
   useEffect(() => () => {
-    stop();
-  }, [stop]);
+    clearIntervalRef();
+    clearRestartTimeout();
+  }, [clearIntervalRef, clearRestartTimeout]);
 
   return {
     remainingSeconds,
@@ -186,4 +360,52 @@ export const useCountdown = (
   };
 };
 
-export type { UseCountdownResult };
+const computeRemainingFromTarget = (targetTimestamp: number | null): number | null => {
+  if (targetTimestamp === null) {
+    return null;
+  }
+
+  const diff = targetTimestamp - Date.now();
+
+  return Math.max(0, Math.ceil(diff / 1000));
+};
+
+export const readCountdownSnapshot = (
+  storageKey: string,
+  fallbackSeconds: number
+): CountdownSnapshot => {
+  if (typeof window === 'undefined') {
+    return {
+      remainingSeconds: fallbackSeconds,
+      targetTimestamp: null,
+      isRunning: false,
+      lastUpdated: null,
+    };
+  }
+
+  const persistedSeconds = readPersistedSeconds(storageKey);
+  const persistedMeta = readPersistedMeta(storageKey);
+
+  const normalizedFallback = toPositiveInteger(fallbackSeconds);
+  const baseline =
+    persistedSeconds !== null ? Math.min(persistedSeconds, normalizedFallback) : normalizedFallback;
+
+  const remainingFromTarget = computeRemainingFromTarget(persistedMeta?.targetTimestamp ?? null);
+  const remainingSeconds =
+    typeof remainingFromTarget === 'number'
+      ? Math.min(remainingFromTarget, normalizedFallback)
+      : baseline;
+
+  const targetTimestamp = persistedMeta?.targetTimestamp ?? null;
+  const isRunning =
+    targetTimestamp !== null && targetTimestamp > Date.now() ? persistedMeta?.isRunning ?? false : false;
+
+  return {
+    remainingSeconds,
+    targetTimestamp,
+    isRunning,
+    lastUpdated: persistedMeta?.lastUpdated ?? null,
+  };
+};
+
+export type { UseCountdownResult, CountdownSnapshot };

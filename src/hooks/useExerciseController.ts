@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { type Exercise } from '../types';
-import { useCountdown } from './useCountdown';
+import { readCountdownSnapshot, useCountdown } from './useCountdown';
 import {
   playBreakCompleteSound,
   playFocusCompleteSound,
@@ -136,17 +136,7 @@ export const useExerciseController = (
       return fallback;
     }
 
-    const raw = window.localStorage.getItem(storageKey);
-    if (raw === null) {
-      return fallback;
-    }
-
-    const parsed = Number.parseInt(raw, 10);
-    if (!Number.isFinite(parsed)) {
-      return fallback;
-    }
-
-    return Math.max(0, parsed);
+    return readCountdownSnapshot(storageKey, fallback).remainingSeconds;
   }, []);
 
   useEffect(() => {

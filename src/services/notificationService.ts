@@ -124,5 +124,30 @@ export const sendNotification = ({ title, options }: NotificationPayload): void 
     return;
   }
 
+  if ('serviceWorker' in navigator) {
+    const fallbackToWindowNotification = () => {
+      new Notification(title, options);
+    };
+
+    void navigator.serviceWorker
+      .getRegistration()
+      .then((registration) => {
+        if (!registration) {
+          fallbackToWindowNotification();
+          return;
+        }
+
+        if (registration.active) {
+          return registration.showNotification(title, options).catch(fallbackToWindowNotification);
+        }
+
+        return navigator.serviceWorker.ready
+          .then((readyRegistration) => readyRegistration.showNotification(title, options))
+          .catch(fallbackToWindowNotification);
+      })
+      .catch(fallbackToWindowNotification);
+    return;
+  }
+
   new Notification(title, options);
 };
